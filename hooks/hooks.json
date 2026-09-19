@@ -1,0 +1,4 @@
+{
+  "description": "Fail-closed, action-scoped native-model review for pending tool permissions",
+  "modules": ["./register.ts"]
+}

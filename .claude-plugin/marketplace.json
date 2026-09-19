@@ -1,0 +1,13 @@
+{
+  "name": "prvious-plugins",
+  "owner": {
+    "name": "prvious"
+  },
+  "description": "Personal Claude Code plugins from prvious",
+  "plugins": [
+    {
+      "name": "approval-reviewer",
+      "source": "./"
+    }
+  ]
+}
