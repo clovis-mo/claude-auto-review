@@ -48,7 +48,9 @@ The installer may report that the optional `model` setting is not yet set. Leavi
 claude
 ```
 
-No `--plugin-dir` argument is required.
+For normal terminal launches, no `--plugin-dir` argument is required. Some
+desktop integrations need the app-specific workaround below because they do
+not preserve the normal Claude Code launch environment or plugin registry.
 
 ## Verify
 
@@ -63,6 +65,72 @@ Verify all of the following:
 `checking` is not ready. `unavailable` means covered requests fail closed and the reviewer must not be treated as active. No reviewer status means the plugin or function-hook support did not load.
 
 An action already allowed by native settings does not prove reviewer handling. Prove a deny with both a matching history entry and absence of the prohibited side effect; Claude declining to submit a tool call is inconclusive.
+
+## Pen and similar desktop apps (macOS)
+
+On Pen `1.2.13` with Claude Code `2.1.278`, resumed sessions used a temporary
+`CLAUDE_CONFIG_DIR` that lost the installed plugin. A wrapper reloads it
+explicitly. Wrapper launch checks passed; permission handling across Pen
+resumes still needs end-to-end verification. Other apps remain unverified.
+
+Copy this entire prompt to your coding agent. For another app, add
+`Target app: <name>` above it.
+
+```text
+Set up approval-reviewer for Pen on this Mac. Inspect before changing anything,
+perform the work yourself, keep the wrapper outside the plugin repository, and
+do not commit changes.
+
+1. Discover the real Claude executable and record its absolute path and version.
+   Do not assume `~/.local/bin/claude` or point the wrapper back to itself. If
+   the user-scoped plugin is missing, run with the real executable:
+
+       claude plugin marketplace add prvious/claude-auto-review --scope user
+       claude plugin install approval-reviewer@prvious-plugins --scope user
+       claude plugin list
+
+2. Create executable `~/.local/bin/claude-pen-reviewer`. On every invocation:
+   - Read the permanent user's
+     `~/.claude/plugins/installed_plugins.json`, ignoring Pen's temporary
+     `CLAUDE_CONFIG_DIR`.
+   - Resolve `approval-reviewer@prvious-plugins` at runtime and select exactly
+     one valid user-scoped entry. Inspect all entries; never assume index 0.
+   - Validate `installPath/.claude-plugin/plugin.json`; fail clearly on stderr
+     if missing or ambiguous, and keep stdout clean.
+   - Export `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`.
+   - `exec` the real Claude binary with `--plugin-dir "$plugin_dir"` followed by
+     `"$@"`, preserving arguments, stdio, and exit status.
+   Use only macOS-provided `/bin/sh` and `/usr/bin/plutil`. If the user has an
+   intentional permanent custom Claude config directory, inspect and use it.
+
+3. Fully quit Pen and save its previous Claude executable setting for rollback.
+   Verify `~/Library/Application Support/Pen/config.json` and its
+   `claudeExecutablePath` key exist, then change only that key to the wrapper's
+   absolute path. This is also Pen's advanced executable setting.
+
+4. Check wrapper syntax and `--version`, including with `CLAUDE_CONFIG_DIR`
+   pointing at an empty disposable directory. Validate the resolved plugin.
+   Verify the app path, then launch diagnostics from an attached terminal:
+
+       DEBUG_CLAUDE_AGENT_SDK=1 /Applications/Pen.app/Contents/MacOS/Pen
+
+5. In a disposable workspace, test harmless covered allow and deny requests in
+   both a fresh conversation and after Pen resumes following a question. Prove
+   reviewer handling with history or other concrete execution evidence and the
+   actual side effect or its absence. Already-allowed actions and load messages
+   are insufficient. Never answer covered permission prompts on the reviewer's
+   behalf; reaching manual approval fails the test. Do not relax permission,
+   sandbox, or organization controls. Login and plugin trust are separate.
+
+For another app, first prove it launches a configurable local Claude executable
+with native function-hook support. Discover its settings and resume behavior;
+do not reuse Pen's paths or assume compatibility.
+
+Report paths, tested builds, observed results, and unverified coverage. Explain
+rollback: quit the app, restore its previous executable, and relaunch without
+diagnostic flags. Restore the executable before removing the wrapper; explicit
+`--plugin-dir` loading may remain active despite marketplace disable.
+```
 
 ## Behavior
 
