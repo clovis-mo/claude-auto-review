@@ -30,6 +30,36 @@ export type Assessment = {
 export type ReviewResponse = NeedEvidence | Assessment
 export type PolicyDecision = { allow: boolean; reason: string }
 
+export const PROTOCOL_ERROR_CODES = [
+  'output-too-large',
+  'not-json',
+  'wrong-shape',
+  'invalid-evidence-shape',
+  'invalid-evidence-count',
+  'invalid-evidence-request',
+  'invalid-evidence-operation',
+  'invalid-evidence-path',
+  'invalid-assessment-shape',
+  'invalid-enum',
+  'invalid-boolean',
+  'invalid-reason',
+  'invalid-evidence-ids',
+  'evidence-round-exhausted',
+  'attempt-budget-exhausted',
+] as const
+
+export type ProtocolErrorCode = (typeof PROTOCOL_ERROR_CODES)[number]
+
+export class ReviewProtocolError extends Error {
+  readonly code: ProtocolErrorCode
+
+  constructor(code: ProtocolErrorCode, message: string) {
+    super(message)
+    this.name = 'ReviewProtocolError'
+    this.code = code
+  }
+}
+
 const ASSESSMENT_KEYS = [
   'authorization',
   'decisionCriticalUncertainty',
@@ -58,7 +88,12 @@ export function parseReviewResponse(
   text: string,
   knownEvidenceIds: ReadonlySet<string>,
 ): ReviewResponse {
-  if (text.length > 16_384) throw new Error('review output is too large')
+  if (typeof text !== 'string') {
+    throw new ReviewProtocolError('wrong-shape', 'review output is not text')
+  }
+  if (text.length > 16_384) {
+    throw new ReviewProtocolError('output-too-large', 'review output is too large')
+  }
   const trimmed = text.trim()
   const candidate =
     trimmed.startsWith('```json\n') && trimmed.endsWith('\n```')
@@ -69,26 +104,32 @@ export function parseReviewResponse(
   try {
     value = JSON.parse(candidate)
   } catch {
-    throw new Error('review output is not JSON')
+    throw new ReviewProtocolError('not-json', 'review output is not JSON')
   }
   if (!isRecord(value) || typeof value.type !== 'string') {
-    throw new Error('review output is not an object variant')
+    throw new ReviewProtocolError('wrong-shape', 'review output is not an object variant')
   }
 
   if (value.type === 'need_evidence') {
     if (!hasExactKeys(value, EVIDENCE_KEYS) || !Array.isArray(value.requests)) {
-      throw new Error('invalid evidence request shape')
+      throw new ReviewProtocolError('invalid-evidence-shape', 'invalid evidence request shape')
     }
     if (value.requests.length < 1 || value.requests.length > 4) {
-      throw new Error('evidence request count is outside the limit')
+      throw new ReviewProtocolError(
+        'invalid-evidence-count',
+        'evidence request count is outside the limit',
+      )
     }
     const seen = new Set<string>()
     const requests = value.requests.map(request => {
       if (!isRecord(request) || !hasExactKeys(request, REQUEST_KEYS)) {
-        throw new Error('invalid evidence request')
+        throw new ReviewProtocolError('invalid-evidence-request', 'invalid evidence request')
       }
       if (!isEnum(request.operation, ['stat', 'list', 'read'] as const)) {
-        throw new Error('invalid evidence operation')
+        throw new ReviewProtocolError(
+          'invalid-evidence-operation',
+          'invalid evidence operation',
+        )
       }
       if (
         typeof request.path !== 'string' ||
@@ -96,7 +137,10 @@ export function parseReviewResponse(
         request.path.length > 4_096 ||
         seen.has(request.path)
       ) {
-        throw new Error('invalid or duplicate evidence path')
+        throw new ReviewProtocolError(
+          'invalid-evidence-path',
+          'invalid or duplicate evidence path',
+        )
       }
       seen.add(request.path)
       return { operation: request.operation, path: request.path }
@@ -105,10 +149,10 @@ export function parseReviewResponse(
   }
 
   if (value.type !== 'assessment' || !hasExactKeys(value, ASSESSMENT_KEYS)) {
-    throw new Error('invalid assessment shape')
+    throw new ReviewProtocolError('invalid-assessment-shape', 'invalid assessment shape')
   }
   if (!isEnum(value.risk, RISKS) || !isEnum(value.authorization, AUTHORIZATIONS)) {
-    throw new Error('invalid assessment enum')
+    throw new ReviewProtocolError('invalid-enum', 'invalid assessment enum')
   }
   for (const key of [
     'narrowlyScoped',
@@ -117,14 +161,16 @@ export function parseReviewResponse(
     'maliciousUntrustedInstruction',
     'decisionCriticalUncertainty',
   ] as const) {
-    if (typeof value[key] !== 'boolean') throw new Error(`invalid ${key}`)
+    if (typeof value[key] !== 'boolean') {
+      throw new ReviewProtocolError('invalid-boolean', 'invalid ' + key)
+    }
   }
   if (
     typeof value.reason !== 'string' ||
     value.reason.trim().length < 1 ||
     value.reason.length > 500
   ) {
-    throw new Error('invalid assessment reason')
+    throw new ReviewProtocolError('invalid-reason', 'invalid assessment reason')
   }
   if (
     !Array.isArray(value.evidenceIds) ||
@@ -132,7 +178,10 @@ export function parseReviewResponse(
     value.evidenceIds.some(id => typeof id !== 'string' || !knownEvidenceIds.has(id)) ||
     new Set(value.evidenceIds).size !== value.evidenceIds.length
   ) {
-    throw new Error('invalid assessment evidence ids')
+    throw new ReviewProtocolError(
+      'invalid-evidence-ids',
+      'invalid assessment evidence ids',
+    )
   }
 
   return value as Assessment

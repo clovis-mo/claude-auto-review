@@ -2,6 +2,14 @@ import { expect, mock, test, tier } from 'claude-code/testing'
 
 tier('user')
 
+const usage = {
+  input_tokens: 1,
+  output_tokens: 1,
+  cache_read_input_tokens: 0,
+  cache_creation_input_tokens: 0,
+}
+const answeredOk = { isAnswered: true, text: 'ok', usage }
+
 test('startup capability check uses the sonnet alias', async ($, on) => {
   mock.clock(on)
   mock.store(on)
@@ -10,7 +18,7 @@ test('startup capability check uses the sonnet alias', async ($, on) => {
   on('session.messages', () => ({ value: [] }))
   on('model.complete', (_core, event) => {
     request = event
-    return { value: 'ok' }
+    return { value: answeredOk }
   })
   on('command.register', () => ({ value: {} }))
   on('ui.status', () => ({ value: null }))
@@ -43,9 +51,312 @@ test('startup model failure reports unavailable without fallback', async ($, on)
   await expect($.session.start({ cwd: '/work' })).resolves.toEqual({ cwd: '/work' })
   expect(statuses).toEqual([
     'approval reviewer checking',
-    'approval reviewer unavailable — covered asks deny',
+    'approval reviewer unavailable — model-reviewed asks deny',
   ])
   expect(modelRequests).toBe(1)
+})
+
+test('startup treats an unanswered provider result as unavailable', async ($, on) => {
+  mock.clock(on)
+  mock.store(on)
+  const statuses: string[] = []
+  let modelRequests = 0
+  on('session.id', () => ({ value: 'session-startup-unanswered' }))
+  on('session.messages', () => ({ value: [] }))
+  on('model.complete', () => {
+    modelRequests += 1
+    return {
+      value: {
+        isAnswered: false,
+        reason: 'api-error',
+        status: 529,
+        error: 'overloaded',
+        usage,
+      },
+    }
+  })
+  on('command.register', () => ({ value: {} }))
+  on('ui.status', (_core, event) => {
+    statuses.push(event.text)
+    return { value: null }
+  })
+  on('session.start', () => ({ cwd: '/work' }))
+
+  await expect($.session.start({ cwd: '/work' })).resolves.toEqual({ cwd: '/work' })
+  expect(statuses).toEqual([
+    'approval reviewer checking',
+    'approval reviewer unavailable — model-reviewed asks deny',
+  ])
+  expect(modelRequests).toBe(1)
+})
+
+test('fails closed when the transcript is ahead of retained owner context', async ($, on) => {
+  mock.clock(on)
+  const sessionId = 'session-partial-owner-ledger-20260922'
+  const store = new Map<string, unknown>([
+    [
+      `session:${sessionId}`,
+      {
+        sessionId,
+        generation: 1,
+        instructionGeneration: 1,
+        permissionGeneration: 0,
+        planMode: false,
+        nextOwnerId: 2,
+        ownerMessages: [{ id: 'u1', original: 'older instruction', at: 0 }],
+        agentTasks: [],
+        history: [],
+        contextGap: false,
+        closed: true,
+        touchedAt: 0,
+      },
+    ],
+  ])
+  const statuses: string[] = []
+  let modelRequests = 0
+  on('store.set', (_core, event) => {
+    store.set(event.key, event.value)
+    return { value: undefined }
+  })
+  on('store.get', (_core, event) => ({ value: store.get(event.key) }))
+  on('store.keys', () => ({ value: [...store.keys()] }))
+  on('store.delete', (_core, event) => {
+    store.delete(event.key)
+    return { value: undefined }
+  })
+  on('session.id', () => ({ value: sessionId }))
+  on('session.messages', () => ({
+    value: [
+      { role: 'user', text: 'older instruction', toolUses: [] },
+      { role: 'user', text: 'new prohibition', toolUses: [] },
+    ],
+  }))
+  on('model.complete', () => {
+    modelRequests += 1
+    return { value: answeredOk }
+  })
+  on('command.register', () => ({ value: {} }))
+  on('ui.status', (_core, event) => {
+    statuses.push(event.text)
+    return { value: null }
+  })
+  on('session.start', () => ({ cwd: '/work' }))
+
+  await expect($.session.start({ cwd: '/work' })).resolves.toEqual({ cwd: '/work' })
+  expect(modelRequests).toBe(0)
+  expect(statuses).toEqual([
+    'approval reviewer checking',
+    'approval reviewer unavailable — model-reviewed asks deny',
+  ])
+  expect(
+    (store.get(`session:${sessionId}`) as { contextGap: boolean }).contextGap,
+  ).toBe(true)
+})
+
+test('fails closed when retained owner context disagrees with the transcript', async ($, on) => {
+  mock.clock(on)
+  const sessionId = 'session-replaced-owner-ledger-20260922'
+  const store = new Map<string, unknown>([
+    [
+      `session:${sessionId}`,
+      {
+        sessionId,
+        generation: 1,
+        instructionGeneration: 1,
+        permissionGeneration: 0,
+        planMode: false,
+        nextOwnerId: 2,
+        ownerMessages: [{ id: 'u1', original: 'old authorization', at: 0 }],
+        agentTasks: [],
+        history: [],
+        contextGap: false,
+        closed: true,
+        touchedAt: 0,
+      },
+    ],
+  ])
+  let modelRequests = 0
+  on('store.set', (_core, event) => {
+    store.set(event.key, event.value)
+    return { value: undefined }
+  })
+  on('store.get', (_core, event) => ({ value: store.get(event.key) }))
+  on('store.keys', () => ({ value: [...store.keys()] }))
+  on('store.delete', (_core, event) => {
+    store.delete(event.key)
+    return { value: undefined }
+  })
+  on('session.id', () => ({ value: sessionId }))
+  on('session.messages', () => ({
+    value: [{ role: 'user', text: 'new prohibition', toolUses: [] }],
+  }))
+  on('model.complete', () => {
+    modelRequests += 1
+    return { value: answeredOk }
+  })
+  on('command.register', () => ({ value: {} }))
+  on('ui.status', () => ({ value: null }))
+  on('session.start', () => ({ cwd: '/work' }))
+
+  await expect($.session.start({ cwd: '/work' })).resolves.toEqual({ cwd: '/work' })
+  expect(modelRequests).toBe(0)
+  expect(
+    (store.get(`session:${sessionId}`) as { contextGap: boolean }).contextGap,
+  ).toBe(true)
+})
+
+test('serializes the shared session index across concurrent sessions', async ($, on) => {
+  mock.clock(on)
+  const sessionIds = ['session-index-a-20260922', 'session-index-b-20260922']
+  const store = new Map<string, unknown>()
+  let sessionIdCall = 0
+  let indexReads = 0
+  let enterIndexRead!: () => void
+  let releaseIndexRead!: () => void
+  const indexReadEntered = new Promise<void>(resolve => {
+    enterIndexRead = resolve
+  })
+  const indexReadRelease = new Promise<void>(resolve => {
+    releaseIndexRead = resolve
+  })
+  on('store.set', (_core, event) => {
+    store.set(event.key, event.value)
+    return { value: undefined }
+  })
+  on('store.get', async (_core, event) => {
+    if (event.key === 'session-index') {
+      indexReads += 1
+      if (indexReads === 1) {
+        enterIndexRead()
+        await indexReadRelease
+      }
+    }
+    return { value: store.get(event.key) }
+  })
+  on('store.keys', () => ({ value: [...store.keys()] }))
+  on('store.delete', (_core, event) => {
+    store.delete(event.key)
+    return { value: undefined }
+  })
+  on('session.id', () => ({ value: sessionIds[sessionIdCall++]! }))
+  on('session.messages', () => ({ value: [] }))
+  on('model.complete', () => ({ value: answeredOk }))
+  on('command.register', () => ({ value: {} }))
+  on('ui.status', () => ({ value: null }))
+  on('session.start', (_core, event) => ({ cwd: event.cwd }))
+
+  const first = $.session.start({ cwd: '/work/a' })
+  await indexReadEntered
+  const second = $.session.start({ cwd: '/work/b' })
+  for (let index = 0; index < 5; index += 1) await Promise.resolve()
+  expect(indexReads).toBe(1)
+  releaseIndexRead()
+  await expect(Promise.all([first, second])).resolves.toEqual([
+    { cwd: '/work/a' },
+    { cwd: '/work/b' },
+  ])
+  expect(indexReads).toBe(2)
+  expect(
+    ((store.get('session-index') as Array<{ sessionId: string }>)).map(
+      entry => entry.sessionId,
+    ).sort(),
+  ).toEqual([...sessionIds].sort())
+})
+
+test('reactivates a closed session on same-runtime resume', async ($, on) => {
+  mock.clock(on)
+  const sessionId = 'session-resume-same-runtime-20260920'
+  const store = new Map<string, unknown>()
+  let downstreamCalls = 0
+  on('store.set', (_core, event) => {
+    store.set(event.key, event.value)
+    return { value: undefined }
+  })
+  on('store.get', (_core, event) => ({ value: store.get(event.key) }))
+  on('store.keys', () => ({ value: [...store.keys()] }))
+  on('store.delete', (_core, event) => {
+    store.delete(event.key)
+    return { value: undefined }
+  })
+  on('session.id', () => ({ value: sessionId }))
+  on('session.messages', () => ({ value: [] }))
+  on('session.cwd', () => ({ value: '/work' }))
+  on('session.root', () => ({ value: '/work' }))
+  on('model.complete', () => ({ value: answeredOk }))
+  on('command.register', () => ({ value: {} }))
+  on('ui.status', () => ({ value: null }))
+  on('session.start', () => ({ cwd: '/work' }))
+  on('session.end', () => ({ sessionId }))
+  on('prompt.submit', (_core, event) => ({ text: event.text }))
+  on('tool.call', () => {
+    downstreamCalls += 1
+    return { result: undefined }
+  })
+
+  await $.session.start({ cwd: '/work' })
+  await $.prompt.submit({
+    text: 'keep this constraint',
+    origin: { kind: 'composer' },
+  } as never)
+  await $.session.end({ sessionId })
+  await $.session.start({ cwd: '/work' })
+  await expect(
+    $.tool.call({ tool: 'Example', tool_use_id: 'resume-call-1', input: {} }),
+  ).resolves.toEqual({ result: undefined })
+  expect(downstreamCalls).toBe(1)
+  expect(
+    (store.get(`session:${sessionId}`) as {
+      ownerMessages: Array<{ original: string }>
+    }).ownerMessages.map(message => message.original),
+  ).toEqual(['keep this constraint'])
+})
+
+test('denies a tool call prepared across same-runtime resume', async ($, on) => {
+  mock.clock(on)
+  mock.store(on)
+  const sessionId = 'session-resume-race-20260920'
+  let downstreamCalls = 0
+  let enterRoot!: () => void
+  let releaseRoot!: () => void
+  const rootEntered = new Promise<void>(resolve => {
+    enterRoot = resolve
+  })
+  const rootRelease = new Promise<void>(resolve => {
+    releaseRoot = resolve
+  })
+  on('session.id', () => ({ value: sessionId }))
+  on('session.messages', () => ({ value: [] }))
+  on('session.cwd', () => ({ value: '/work' }))
+  on('session.root', async () => {
+    enterRoot()
+    await rootRelease
+    return { value: '/work' }
+  })
+  on('model.complete', () => ({ value: answeredOk }))
+  on('command.register', () => ({ value: {} }))
+  on('ui.status', () => ({ value: null }))
+  on('session.start', () => ({ cwd: '/work' }))
+  on('session.end', () => ({ sessionId }))
+  on('tool.call', () => {
+    downstreamCalls += 1
+    return { result: undefined }
+  })
+
+  await $.session.start({ cwd: '/work' })
+  const pendingCall = $.tool.call({
+    tool: 'Example',
+    tool_use_id: 'resume-race-call-1',
+    input: {},
+  })
+  await rootEntered
+  await $.session.end({ sessionId })
+  await $.session.start({ cwd: '/work' })
+  releaseRoot()
+
+  await expect(pendingCall).resolves.toEqual({
+    deny: 'Approval reviewer session is closed.',
+  })
+  expect(downstreamCalls).toBe(0)
 })
 
 test('preserves a downstream allow decision', async ($, on) => {
@@ -62,7 +373,7 @@ test('preserves a downstream deny decision', async ($, on) => {
   ).resolves.toEqual({ decision: 'deny' })
 })
 
-test('turns a pending ExitPlanMode ask into a final deny', async ($, on) => {
+test('denies ExitPlanMode asks directly', async ($, on) => {
   mock.clock(on)
   mock.store(on)
   on('session.id', () => ({ value: 'session-plan' }))
@@ -89,4 +400,295 @@ test('an uncorrelated pending ask fails closed', async ($, on) => {
     reason:
       'Approval reviewer unavailable (context-integrity); this request was denied.',
   })
+})
+
+test('does not commit an owner prompt after the session is resumed', async ($, on) => {
+  mock.clock(on)
+  const sessionId = 'session-prompt-resume-race-20260920'
+  const store = new Map<string, unknown>()
+  const sets: Array<{ key: string; value: unknown }> = []
+  let enterPrompt!: () => void
+  let releasePrompt!: () => void
+  const promptEntered = new Promise<void>(resolve => {
+    enterPrompt = resolve
+  })
+  const promptRelease = new Promise<void>(resolve => {
+    releasePrompt = resolve
+  })
+  on('store.set', (_core, event) => {
+    sets.push({ key: event.key, value: event.value })
+    store.set(event.key, event.value)
+    return { value: undefined }
+  })
+  on('store.get', (_core, event) => ({ value: store.get(event.key) }))
+  on('store.keys', () => ({ value: [...store.keys()] }))
+  on('store.delete', (_core, event) => {
+    store.delete(event.key)
+    return { value: undefined }
+  })
+  on('session.id', () => ({ value: sessionId }))
+  on('session.messages', () => ({ value: [] }))
+  on('session.cwd', () => ({ value: '/work' }))
+  on('session.root', () => ({ value: '/work' }))
+  on('model.complete', () => ({ value: answeredOk }))
+  on('command.register', () => ({ value: {} }))
+  on('ui.status', () => ({ value: null }))
+  on('session.start', () => ({ cwd: '/work' }))
+  on('session.end', () => ({ sessionId }))
+  on('prompt.submit', async (_core, event) => {
+    if (event.text === 'old prompt') {
+      enterPrompt()
+      await promptRelease
+    }
+    return { text: event.text }
+  })
+
+  await $.session.start({ cwd: '/work' })
+  const pending = $.prompt.submit({
+    text: 'old prompt',
+    origin: { kind: 'composer' },
+  } as never)
+  await promptEntered
+  await $.session.end({ sessionId })
+  await $.session.start({ cwd: '/work' })
+  releasePrompt()
+
+  await expect(pending).resolves.toEqual({ text: 'old prompt' })
+  const sessionWrites = sets.filter(entry => entry.key === `session:${sessionId}`)
+  expect(sessionWrites.length).toBe(3)
+  for (const entry of sessionWrites) {
+    expect((entry.value as { ownerMessages: unknown[] }).ownerMessages).toEqual([])
+  }
+  expect(
+    (sessionWrites.at(-1)?.value as { generation: number }).generation,
+  ).toBe(3)
+})
+
+test('does not retain a subagent prompt after the session is resumed', async ($, on) => {
+  mock.clock(on)
+  const sessionId = 'session-agent-resume-race-20260922'
+  const store = new Map<string, unknown>()
+  let enterSpawn!: () => void
+  let releaseSpawn!: () => void
+  const spawnEntered = new Promise<void>(resolve => {
+    enterSpawn = resolve
+  })
+  const spawnRelease = new Promise<void>(resolve => {
+    releaseSpawn = resolve
+  })
+  on('store.set', (_core, event) => {
+    store.set(event.key, event.value)
+    return { value: undefined }
+  })
+  on('store.get', (_core, event) => ({ value: store.get(event.key) }))
+  on('store.keys', () => ({ value: [...store.keys()] }))
+  on('store.delete', (_core, event) => {
+    store.delete(event.key)
+    return { value: undefined }
+  })
+  on('session.id', () => ({ value: sessionId }))
+  on('session.messages', () => ({ value: [] }))
+  on('model.complete', () => ({ value: answeredOk }))
+  on('command.register', () => ({ value: {} }))
+  on('ui.status', () => ({ value: null }))
+  on('session.start', () => ({ cwd: '/work' }))
+  on('session.end', () => ({ sessionId }))
+  on('agent.spawn', async () => {
+    enterSpawn()
+    await spawnRelease
+    return { model: 'sonnet', agentId: 'stale-agent' }
+  })
+
+  await $.session.start({ cwd: '/work' })
+  const pending = $.agent.spawn({ prompt: 'old delegated task' })
+  await spawnEntered
+  await $.session.end({ sessionId })
+  await $.session.start({ cwd: '/work' })
+  releaseSpawn()
+
+  await expect(pending).resolves.toEqual({
+    model: 'sonnet',
+    agentId: 'stale-agent',
+  })
+  expect(
+    (store.get(`session:${sessionId}`) as { agentTasks: unknown[] }).agentTasks,
+  ).toEqual([])
+})
+
+test('tombstones a pending state load when the session ends', async ($, on) => {
+  mock.clock(on)
+  const sessionId = 'session-end-during-load-20260921'
+  const store = new Map<string, unknown>()
+  const statuses: string[] = []
+  let enterStoreGet!: () => void
+  let releaseStoreGet!: () => void
+  const storeGetEntered = new Promise<void>(resolve => {
+    enterStoreGet = resolve
+  })
+  const storeGetRelease = new Promise<void>(resolve => {
+    releaseStoreGet = resolve
+  })
+  let holdSessionGet = true
+  let modelRequests = 0
+
+  on('store.set', (_core, event) => {
+    store.set(event.key, event.value)
+    return { value: undefined }
+  })
+  on('store.get', async (_core, event) => {
+    if (holdSessionGet && event.key === `session:${sessionId}`) {
+      holdSessionGet = false
+      enterStoreGet()
+      await storeGetRelease
+    }
+    return { value: store.get(event.key) }
+  })
+  on('store.keys', () => ({ value: [...store.keys()] }))
+  on('store.delete', (_core, event) => {
+    store.delete(event.key)
+    return { value: undefined }
+  })
+  on('session.id', () => ({ value: sessionId }))
+  on('session.messages', () => ({ value: [] }))
+  on('model.complete', () => {
+    modelRequests += 1
+    return { value: answeredOk }
+  })
+  on('command.register', () => ({ value: {} }))
+  on('ui.status', (_core, event) => {
+    statuses.push(event.text)
+    return { value: null }
+  })
+  on('session.start', () => ({ cwd: '/work' }))
+  on('session.end', () => ({ sessionId }))
+
+  const pendingStart = $.session.start({ cwd: '/work' })
+  await storeGetEntered
+  await expect($.session.end({ sessionId })).resolves.toEqual({ sessionId })
+  releaseStoreGet()
+
+  await expect(pendingStart).resolves.toEqual({ cwd: '/work' })
+  await expect(
+    $.tool.call({ tool: 'Example', tool_use_id: 'ended-load-call', input: {} }),
+  ).resolves.toEqual({ deny: 'Approval reviewer session is closed.' })
+  expect(statuses).toEqual([])
+  expect(modelRequests).toBe(0)
+  expect(store.get(`session:${sessionId}`)).toBeUndefined()
+})
+
+test('does not let stale startup overwrite a resumed generation', async ($, on) => {
+  mock.clock(on)
+  const sessionId = 'session-stale-startup-20260921'
+  const store = new Map<string, unknown>([
+    [
+      `session:${sessionId}`,
+      {
+        sessionId,
+        generation: 1,
+        instructionGeneration: 0,
+        permissionGeneration: 0,
+        planMode: false,
+        nextOwnerId: 2,
+        ownerMessages: [{ id: 'u1', original: 'retain this', at: 0 }],
+        agentTasks: [],
+        history: [
+          {
+            requestId: 'history-1',
+            fingerprint: 'fingerprint-1',
+            action: 'Example request',
+            verdict: 'allow',
+            reason: 'already retained',
+            elapsedMs: 0,
+            at: 0,
+          },
+        ],
+        contextGap: false,
+        closed: false,
+        touchedAt: 0,
+      },
+    ],
+  ])
+  const sets: Array<{ key: string; value: unknown }> = []
+  const statuses: string[] = []
+  let enterOldMessages!: () => void
+  let releaseOldMessages!: () => void
+  const oldMessagesEntered = new Promise<void>(resolve => {
+    enterOldMessages = resolve
+  })
+  const oldMessagesRelease = new Promise<void>(resolve => {
+    releaseOldMessages = resolve
+  })
+  let messageCalls = 0
+  let modelRequests = 0
+
+  on('store.set', (_core, event) => {
+    sets.push({ key: event.key, value: event.value })
+    store.set(event.key, event.value)
+    return { value: undefined }
+  })
+  on('store.get', (_core, event) => ({ value: store.get(event.key) }))
+  on('store.keys', () => ({ value: [...store.keys()] }))
+  on('store.delete', (_core, event) => {
+    store.delete(event.key)
+    return { value: undefined }
+  })
+  on('session.id', () => ({ value: sessionId }))
+  on('session.messages', async () => {
+    messageCalls += 1
+    if (messageCalls === 1) {
+      enterOldMessages()
+      await oldMessagesRelease
+    }
+    return { value: [] }
+  })
+  on('model.complete', () => {
+    modelRequests += 1
+    return { value: answeredOk }
+  })
+  on('command.register', () => ({ value: {} }))
+  on('ui.status', (_core, event) => {
+    statuses.push(event.text)
+    return { value: null }
+  })
+  on('session.start', () => ({ cwd: '/work' }))
+  on('session.end', () => ({ sessionId }))
+
+  const oldStart = $.session.start({ cwd: '/work' })
+  await oldMessagesEntered
+  await $.session.end({ sessionId })
+  await expect($.session.start({ cwd: '/work' })).resolves.toEqual({ cwd: '/work' })
+  releaseOldMessages()
+  await expect(oldStart).resolves.toEqual({ cwd: '/work' })
+
+  const sessionWrites = sets.filter(entry => entry.key === `session:${sessionId}`)
+  expect(statuses).toEqual([
+    'approval reviewer checking',
+    'approval reviewer active',
+  ])
+  expect(modelRequests).toBe(1)
+  expect(sessionWrites.map(entry => (entry.value as { generation: number }).generation)).toEqual([
+    3,
+    4,
+  ])
+  expect(sessionWrites.map(entry => (entry.value as { closed: boolean }).closed)).toEqual([
+    true,
+    false,
+  ])
+  expect(
+    (store.get(`session:${sessionId}`) as {
+      generation: number
+      closed: boolean
+      ownerMessages: Array<{ original: string }>
+      history: Array<{ requestId: string }>
+    }),
+  ).toEqual(
+    expect.objectContaining({
+      generation: 4,
+      closed: false,
+      ownerMessages: [{ id: 'u1', original: 'retain this', at: 0 }],
+      history: [
+        expect.objectContaining({ requestId: 'history-1' }),
+      ],
+    }),
+  )
 })

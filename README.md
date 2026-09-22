@@ -2,11 +2,11 @@
 
 An experimental personal Claude Code plugin that resolves covered pending tool-permission requests with the session's native model. It preserves downstream allows and denials, reviews only verified `ask` decisions, and returns a one-shot `allow` or `deny` without writing permission rules.
 
-Claude Code `2.1.278` on macOS with zsh is the verified configuration. Native function hooks are early access, and this plugin reviews covered pending permission requests—not every action Claude Code performs. GitHub installation does not imply compatibility with other builds, platforms, shells, accounts, or organization policies.
+Claude Code `2.1.280` on macOS with zsh is the verified configuration. Native function hooks are early access, and this plugin reviews covered pending permission requests—not every action Claude Code performs. GitHub installation does not imply compatibility with other builds, platforms, shells, accounts, or organization policies.
 
 ## Requirements
 
-- Claude Code `2.1.278` and an existing Claude Code login.
+- Claude Code `2.1.280` and an existing Claude Code login.
 - Account and organization access to Claude Code's `sonnet` family alias.
 - GitHub access to `prvious/claude-auto-review`; private repositories require working Git credentials on each machine.
 - `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` in the environment before Claude Code starts.
@@ -28,7 +28,7 @@ source ~/.zshrc
 printenv CLAUDE_CODE_ENABLE_FUNCTION_HOOKS
 ```
 
-The expected output is `1`. The variable must reach the Claude process before startup. On build `2.1.278`, configuring it through `~/.claude/settings.json` did not enable the early function-hook test command, so that is not a verified substitute for the launch environment.
+The expected output is `1`. The variable must reach the Claude process before startup. On build `2.1.280`, configuring it through `~/.claude/settings.json` did not enable the early function-hook test command, so that is not a verified substitute for the launch environment.
 
 Shell startup files affect only processes that inherit that shell environment. GUI or IDE launches may need separate verified setup. Repeat this setup on every laptop; other shells and operating systems remain unverified. See Anthropic's [environment variable reference](https://code.claude.com/docs/en/env-vars) for the general environment mechanism.
 
@@ -56,19 +56,19 @@ not preserve the normal Claude Code launch environment or plugin registry.
 
 Verify all of the following:
 
-1. `claude plugin list` reports `approval-reviewer@prvious-plugins` at version `0.1.0`.
+1. `claude plugin list` reports `approval-reviewer@prvious-plugins` at version `0.1.1`.
 2. A plain `claude` launch uses no `--plugin-dir` argument.
 3. The footer reaches `approval reviewer active`.
 4. `/approval-history` is available.
 5. In a disposable workspace, a harmless covered action creates a new history entry and the expected real side effect.
 
-`checking` is not ready. `unavailable` means covered requests fail closed and the reviewer must not be treated as active. No reviewer status means the plugin or function-hook support did not load.
+`checking` is not ready. `unavailable` means requests that need model review fail closed; a verified workspace-local mutation may still use the deterministic path below when session integrity is intact. An `all asks deny` integrity failure blocks that path too until a clean session restart. No reviewer status means the plugin or function-hook support did not load.
 
 An action already allowed by native settings does not prove reviewer handling. Prove a deny with both a matching history entry and absence of the prohibited side effect; Claude declining to submit a tool call is inconclusive.
 
 ## Pen and similar desktop apps (macOS)
 
-On Pen `1.2.13` with Claude Code `2.1.278`, resumed sessions used a temporary
+On Pen `1.2.13` with Claude Code `2.1.280`, resumed sessions used a temporary
 `CLAUDE_CONFIG_DIR` that lost the installed plugin. A wrapper reloads it
 explicitly. Wrapper launch checks passed; permission handling across Pen
 resumes still needs end-to-end verification. Other apps remain unverified.
@@ -139,10 +139,42 @@ diagnostic flags. Restore the executable before removing the wrapper; explicit
 - Explicit prohibitions, malicious untrusted instructions, Critical risk, unresolved decision-critical uncertainty, and Plan violations deny.
 - Evidence gathering is read-only, restricted to the verified cwd/root, and bounded by path, entry, file, and total-size limits.
 - Each review has a 60-second deadline from the matching `tool.call`; cancellation or stale context makes a late result unusable.
+- A same-runtime resume of the exact session reactivates its validated retained context with a new generation; pending approvals are discarded. Live end-to-end verification on another laptop remains pending.
 - `ExitPlanMode` asks are denied directly so the plugin never approves leaving Plan mode.
 - `/approval-history` shows recent sanitized decisions for the current conversation.
 
-The default reviewer is Claude Code's `sonnet` family alias, with an optional owner-configured override. Inference uses the current Claude Code login. The plugin does not discover API keys, call a public Models API, set model effort controls, retry, fall back, escalate models, or imitate Auto mode. If the selected model is unavailable or prohibited, the covered request fails closed.
+### Workspace-local file mutations
+
+Verified structured file mutations inside the active workspace are allowed without
+another model review after the normal call-correlation, session, mode, and
+freshness checks succeed. This covers only:
+
+- `Edit.file_path`, for an existing file;
+- `Write.file_path`, for an existing file or a new file; and
+- `NotebookEdit.notebook_path`, for an existing notebook, including cell edits.
+
+The boundary is the canonical Claude session root, so this is workspace-wide and
+is not limited to the process's current working directory. It is not a blanket
+permission for the rest of the machine: the current working directory must be
+inside that root, and a root of `/` disables this fast path. If Claude is
+intentionally launched with the home directory as its root, the home directory
+is consequently the workspace; launching from the repository or worktree root
+is the safer documented setup. Additional `--add-dir` roots are not
+automatically included in this fast path and remain reviewed.
+
+The plugin resolves and validates each target. Any `.git` or `.claude` path
+component, including nested occurrences, is excluded from the fast path and
+remains model-reviewed. Paths outside the root, shell commands or redirections,
+deletes, moves, renames, MCP actions, unknown tools, and anything whose location
+cannot be classified conclusively continue through the normal reviewer. A
+new `Write` qualifies only when target lookup reports `ENOENT` and a validated
+parent listing proves the exact basename absent. A workspace fast-path allow is
+one-shot and creates no standing permission rule.
+This path intentionally trusts the coding agent and its ordinary subagents for
+application-level correctness; it does not perform a second semantic review of
+source or tests, including enforcement of natural-language edit prohibitions.
+
+The default reviewer is Claude Code's `sonnet` family alias, with an optional owner-configured override. Inference uses the current Claude Code login. Each logical review has up to three total native completions: normally one, or two when a valid first completion requests the single evidence round. Invalid JSON, response-shape errors, and invalid assessment enums may trigger bounded repair completions within that same total; other validation failures do not. All completions use the same frozen request context and 60-second deadline. Valid decisions, model/provider exceptions, stale or cancelled requests, deadline expiration, evidence failures, and denied actions are not retried. The plugin does not discover API keys, call a public Models API, set model effort controls, fall back, escalate models, or imitate Auto mode. If the selected model is unavailable or prohibited, requests requiring model review fail closed; the verified workspace fast path does not require the model.
 
 The plugin writes no standing permission rule and changes no permission mode, sandbox, or organization setting.
 
@@ -197,7 +229,7 @@ Node is development/test infrastructure only. Production uses only Claude Code's
 
 ## Compatibility and limitations
 
-- Only Claude Code `2.1.278` on the recorded macOS/zsh setup has been verified.
+- Only Claude Code `2.1.280` on the recorded macOS/zsh setup has been verified.
 - Function hooks may change in later Claude Code releases.
 - The plugin is not an operating-system security boundary and cannot protect a session in which it failed to load.
 - Model availability, usage limits, and organization restrictions still apply.

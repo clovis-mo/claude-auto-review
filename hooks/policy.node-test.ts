@@ -5,6 +5,7 @@ import {
   RISKS,
   applyPolicy,
   parseReviewResponse,
+  ReviewProtocolError,
   type Assessment,
 } from './policy.ts'
 
@@ -94,4 +95,26 @@ test('rejects malformed, extra, oversized, and unknown evidence output', () => {
   for (const value of invalid) {
     assert.throws(() => parseReviewResponse(value, known), value.slice(0, 60))
   }
+})
+
+test('exposes stable protocol error codes without relaxing validation', () => {
+  assert.throws(
+    () => parseReviewResponse('not json', new Set()),
+    error => {
+      assert.equal(error instanceof ReviewProtocolError, true)
+      assert.equal((error as ReviewProtocolError).code, 'not-json')
+      return true
+    },
+  )
+  assert.throws(
+    () =>
+      parseReviewResponse(
+        JSON.stringify(assessment({ risk: 'Severe' as Assessment['risk'] })),
+        new Set(),
+      ),
+    error => {
+      assert.equal((error as ReviewProtocolError).code, 'invalid-enum')
+      return true
+    },
+  )
 })
