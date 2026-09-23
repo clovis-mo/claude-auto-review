@@ -142,7 +142,7 @@ diagnostic flags. Restore the executable before removing the wrapper; explicit
 - A same-runtime resume of the exact session reactivates its validated retained context with a new generation; pending approvals are discarded. Live end-to-end verification on another laptop remains pending.
 - Stored session history is scoped to the session's starting directory. Each directory retains up to eight recent sessions; when all slots are open, the oldest noncurrent session is evicted. A history write failure during session start or end is reported in the status line without disabling unrelated sessions. History from versions before `0.1.2` is not imported; start a new Claude conversation after upgrading.
 - `ExitPlanMode` asks are denied directly so the plugin never approves leaving Plan mode.
-- `/approval-history` shows recent sanitized decisions for the current conversation.
+- `/approval-history` shows up to the last 20 sanitized decisions for the current conversation; older decisions are trimmed from saved history.
 
 ### Workspace-local file mutations
 

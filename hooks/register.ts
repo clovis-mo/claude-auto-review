@@ -16,8 +16,10 @@ const STORE_PREFIX = 'session:'
 const STORE_INDEX = 'session-index'
 const MAX_OWNER_MESSAGES = 256
 const MAX_OWNER_BYTES = 48 * 1024
-const MAX_HISTORY = 128
-const MAX_HISTORY_BYTES = 64 * 1024
+const MAX_HISTORY = 20
+const MAX_LOADED_HISTORY = 128
+const MAX_HISTORY_BYTES = 16 * 1024
+const MAX_LOADED_HISTORY_BYTES = 64 * 1024
 const MAX_SESSION_BYTES = 512 * 1024
 const MAX_STORED_SESSIONS = 8
 const MAX_STORE_BYTES = 3 * 1024 * 1024
@@ -232,8 +234,8 @@ function isStoredState(value: unknown, sessionId: string, workspace: string): va
     Array.isArray(value.history) &&
     value.history.every(isHistoryEntry) &&
     new Set(requestIds).size === requestIds.length &&
-    value.history.length <= MAX_HISTORY &&
-    textBytes(value.history) <= MAX_HISTORY_BYTES &&
+    value.history.length <= MAX_LOADED_HISTORY &&
+    textBytes(value.history) <= MAX_LOADED_HISTORY_BYTES &&
     typeof value.contextGap === 'boolean' &&
     typeof value.closed === 'boolean' &&
     isNumber(value.touchedAt) &&

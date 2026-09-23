@@ -34,6 +34,58 @@ test('startup capability check uses the sonnet alias', async ($, on) => {
   expect(request?.thinking).toBeUndefined()
 })
 
+test('trims previously stored decision history without rejecting the session', async ($, on) => {
+  mock.clock(on)
+  const sessionId = 'session-history-trim'
+  const key = scopedSessionKey('/work', sessionId)
+  const store = new Map<string, unknown>([
+    [key, {
+      sessionId,
+      workspace: '/work',
+      generation: 1,
+      instructionGeneration: 0,
+      permissionGeneration: 0,
+      planMode: false,
+      nextOwnerId: 1,
+      ownerMessages: [],
+      agentTasks: [],
+      history: Array.from({ length: 25 }, (_, index) => ({
+        requestId: `request-${index}`,
+        fingerprint: `fingerprint-${index}`,
+        action: 'Example request',
+        verdict: 'allow',
+        reason: 'allowed',
+        elapsedMs: 0,
+        at: index,
+      })),
+      contextGap: false,
+      closed: true,
+      touchedAt: 0,
+    }],
+  ])
+  on('store.get', (_core, event) => ({ value: store.get(event.key) }))
+  on('store.set', (_core, event) => {
+    store.set(event.key, event.value)
+    return { value: undefined }
+  })
+  on('store.delete', (_core, event) => {
+    store.delete(event.key)
+    return { value: undefined }
+  })
+  on('session.id', () => ({ value: sessionId }))
+  on('session.messages', () => ({ value: [] }))
+  on('model.complete', () => ({ value: answeredOk }))
+  on('command.register', () => ({ value: {} }))
+  on('ui.status', () => ({ value: null }))
+  on('session.start', () => ({ cwd: '/work' }))
+
+  await expect($.session.start({ cwd: '/work' })).resolves.toEqual({ cwd: '/work' })
+  const saved = store.get(key) as { history: Array<{ requestId: string }> }
+  expect(saved.history.map(entry => entry.requestId)).toEqual(
+    Array.from({ length: 20 }, (_, index) => `request-${index + 5}`),
+  )
+})
+
 test('startup model failure reports unavailable without fallback', async ($, on) => {
   mock.clock(on)
   mock.store(on)
