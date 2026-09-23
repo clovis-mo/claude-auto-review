@@ -44,6 +44,7 @@ type HistoryEntry = {
 
 type StoredState = {
   sessionId: string
+  workspace: string
   generation: number
   instructionGeneration: number
   permissionGeneration: number
@@ -60,6 +61,7 @@ type StoredState = {
 type SessionState = StoredState & {
   availability: Availability
   integrityInvalid: boolean
+  storeLoadFailed: boolean
   write: Promise<void>
 }
 
@@ -103,6 +105,7 @@ type SessionLifecycle = {
 
 const stateLoads = new Map<string, StateLoad>()
 const sessionLifecycles = new Map<string, SessionLifecycle>()
+const sessionWorkspaces = new Map<string, string>()
 const calls = new Map<string, CallRecord>()
 let globallyInvalid = false
 let storeWrite = Promise.resolve()
@@ -110,7 +113,10 @@ let storeWrite = Promise.resolve()
 const textBytes = (value: unknown) =>
   new TextEncoder().encode(JSON.stringify(value)).byteLength
 
-const storeKey = (sessionId: string) => `${STORE_PREFIX}${sessionId}`
+const scope = (workspace: string) => encodeURIComponent(workspace)
+const storeKey = (workspace: string, sessionId: string) =>
+  `${STORE_PREFIX}${scope(workspace)}:${sessionId}`
+const indexKey = (workspace: string) => `${STORE_INDEX}:${scope(workspace)}`
 
 const lifecycleFor = (sessionId: string): SessionLifecycle =>
   sessionLifecycles.get(sessionId) ?? { epoch: 0, closed: false }
@@ -140,7 +146,7 @@ const lifecycleIsCurrent = (
 }
 
 const lifecycleTombstone = (sessionId: string) => {
-  const tombstone = freshState(sessionId, 0)
+  const tombstone = freshState(sessionId, 0, '')
   tombstone.closed = true
   tombstone.availability = 'unavailable'
   return tombstone
@@ -186,7 +192,7 @@ function isHistoryEntry(value: unknown): value is HistoryEntry {
   )
 }
 
-function isStoredState(value: unknown, sessionId: string): value is StoredState {
+function isStoredState(value: unknown, sessionId: string, workspace: string): value is StoredState {
   const ownerIds = isRecord(value) && Array.isArray(value.ownerMessages)
     ? value.ownerMessages.map(item => (isRecord(item) ? item.id : undefined))
     : []
@@ -199,6 +205,7 @@ function isStoredState(value: unknown, sessionId: string): value is StoredState 
   return (
     isRecord(value) &&
     value.sessionId === sessionId &&
+    value.workspace === workspace &&
     Number.isInteger(value.generation) &&
     isNumber(value.generation) &&
     Number.isInteger(value.instructionGeneration) &&
@@ -234,8 +241,9 @@ function isStoredState(value: unknown, sessionId: string): value is StoredState 
   )
 }
 
-const freshState = (sessionId: string, now: number): SessionState => ({
+const freshState = (sessionId: string, now: number, workspace: string): SessionState => ({
   sessionId,
+  workspace,
   generation: 1,
   instructionGeneration: 0,
   permissionGeneration: 0,
@@ -249,16 +257,17 @@ const freshState = (sessionId: string, now: number): SessionState => ({
   touchedAt: now,
   availability: 'checking',
   integrityInvalid: false,
+  storeLoadFailed: false,
   write: Promise.resolve(),
 })
 
-function restoredState(value: unknown, sessionId: string, now: number): SessionState {
+function restoredState(value: unknown, sessionId: string, now: number, workspace: string): SessionState {
   if (value === undefined) {
-    return freshState(sessionId, now)
+    return freshState(sessionId, now, workspace)
   }
-  if (!isStoredState(value, sessionId)) {
+  if (!isStoredState(value, sessionId, workspace)) {
     return {
-      ...freshState(sessionId, now),
+      ...freshState(sessionId, now, workspace),
       contextGap: true,
       integrityInvalid: true,
       availability: 'unavailable',
@@ -266,7 +275,7 @@ function restoredState(value: unknown, sessionId: string, now: number): SessionS
   }
   const stored = value
   return {
-    ...freshState(sessionId, now),
+    ...freshState(sessionId, now, workspace),
     generation: stored.generation + 1,
     instructionGeneration: stored.instructionGeneration,
     permissionGeneration: stored.permissionGeneration,
@@ -276,7 +285,7 @@ function restoredState(value: unknown, sessionId: string, now: number): SessionS
     agentTasks: stored.agentTasks.slice(),
     history: stored.history.slice(),
     contextGap: stored.contextGap,
-    closed: false,
+    closed: stored.closed,
     touchedAt: now,
   }
 }
@@ -285,11 +294,17 @@ async function stateFor(
   $: EngineInterface,
   sessionId: string,
   expectedEpoch = lifecycleFor(sessionId).epoch,
+  workspace?: string,
 ): Promise<SessionState> {
   const lifecycle = lifecycleFor(sessionId)
   if (lifecycle.epoch !== expectedEpoch) return lifecycleTombstone(sessionId)
   const current = states.get(sessionId)
-  if (current) return current
+  if (current) {
+    if (workspace === undefined && current.workspace !== sessionWorkspaces.get(sessionId)) {
+      return lifecycleTombstone(sessionId)
+    }
+    return current
+  }
   if (lifecycle.closed) return lifecycleTombstone(sessionId)
   const loading = stateLoads.get(sessionId)
   if (loading?.epoch === expectedEpoch) return loading.promise
@@ -297,11 +312,23 @@ async function stateFor(
   let promise!: Promise<SessionState>
   promise = (async () => {
     const now = await $.clock.now()
-    const saved = await $.store.get(storeKey(sessionId))
+    const directory = workspace ?? sessionWorkspaces.get(sessionId) ?? await $.session.root()
+    let saved: unknown
+    let storeLoadFailed = false
+    try {
+      saved = await $.store.get(storeKey(directory, sessionId))
+    } catch {
+      storeLoadFailed = true
+    }
     if (!lifecycleIsCurrent(sessionId, expectedEpoch)) {
       return lifecycleTombstone(sessionId)
     }
-    const state = restoredState(saved, sessionId, now)
+    const state = restoredState(saved, sessionId, now, directory)
+    if (storeLoadFailed) {
+      state.integrityInvalid = true
+      state.storeLoadFailed = true
+      state.availability = 'unavailable'
+    }
     enforceCaps(state)
     if (!lifecycleIsCurrent(sessionId, expectedEpoch)) {
       return lifecycleTombstone(sessionId)
@@ -321,13 +348,22 @@ async function startingStateFor(
   $: EngineInterface,
   sessionId: string,
   expectedEpoch: number,
+  workspace: string,
 ): Promise<SessionState> {
-  const state = await stateFor($, sessionId, expectedEpoch)
+  const state = await stateFor($, sessionId, expectedEpoch, workspace)
   if (
     !lifecycleIsCurrent(sessionId, expectedEpoch) ||
     states.get(sessionId) !== state
   ) {
     return lifecycleTombstone(sessionId)
+  }
+  if (state.workspace !== workspace) {
+    const changed = freshState(sessionId, await $.clock.now(), workspace)
+    changed.contextGap = true
+    changed.integrityInvalid = true
+    changed.write = state.write
+    states.set(sessionId, changed)
+    return changed
   }
   if (!state.closed) return state
   const now = await $.clock.now()
@@ -337,8 +373,10 @@ async function startingStateFor(
   ) {
     return lifecycleTombstone(sessionId)
   }
-  const restored = restoredState(storedOf(state), sessionId, now)
+  const restored = restoredState(storedOf(state), sessionId, now, workspace)
+  restored.closed = false
   restored.integrityInvalid = state.integrityInvalid
+  restored.storeLoadFailed = state.storeLoadFailed
   restored.write = state.write
   enforceCaps(restored)
   for (const [key, call] of calls) {
@@ -357,6 +395,7 @@ async function startingStateFor(
 function storedOf(state: SessionState): StoredState {
   return {
     sessionId: state.sessionId,
+    workspace: state.workspace,
     generation: state.generation,
     instructionGeneration: state.instructionGeneration,
     permissionGeneration: state.permissionGeneration,
@@ -402,19 +441,19 @@ async function writeState($: EngineInterface, state: SessionState) {
   state.touchedAt = await $.clock.now()
   const stored = storedOf(state)
   const size = textBytes(stored)
-  await $.store.set(storeKey(state.sessionId), stored)
-
-  const raw = await $.store.get(STORE_INDEX)
+  const raw = await $.store.get(indexKey(state.workspace))
   if (
     raw !== undefined &&
     (!Array.isArray(raw) ||
+      new Set(raw.map(item => isRecord(item) ? item.sessionId : undefined)).size !== raw.length ||
       raw.some(
         item =>
           !isRecord(item) ||
           typeof item.sessionId !== 'string' ||
           typeof item.closed !== 'boolean' ||
           !isNumber(item.touchedAt) ||
-          !isNumber(item.bytes),
+          !isNumber(item.bytes) ||
+          !Number.isInteger(item.bytes),
       ))
   ) {
     throw new Error('plugin store index is invalid')
@@ -437,14 +476,17 @@ async function writeState($: EngineInterface, state: SessionState) {
     const position = next.findLastIndex(
       item => item.closed && item.sessionId !== state.sessionId,
     )
-    if (position < 0) throw new Error('plugin store cap cannot be met safely')
-    removed.push(...next.splice(position, 1))
+    const fallback = next.findLastIndex(item => item.sessionId !== state.sessionId)
+    if (position < 0 && fallback < 0) throw new Error('plugin store cap cannot be met safely')
+    removed.push(...next.splice(position < 0 ? fallback : position, 1))
   }
-  await $.store.set(STORE_INDEX, next)
-  for (const entry of removed) await $.store.delete(storeKey(entry.sessionId))
+  await $.store.set(storeKey(state.workspace, state.sessionId), stored)
+  await $.store.set(indexKey(state.workspace), next)
+  for (const entry of removed) await $.store.delete(storeKey(state.workspace, entry.sessionId))
 }
 
 async function saveState($: EngineInterface, state: SessionState) {
+  if (state.storeLoadFailed) throw new Error('session state could not be loaded')
   const write = state.write.then(() => {
     const run = storeWrite.then(() => writeState($, state))
     storeWrite = run.then(
@@ -587,8 +629,9 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     const sessionId = await $.session.id()
+    sessionWorkspaces.set(sessionId, e.cwd)
     const epoch = beginLifecycle(sessionId)
-    const state = await startingStateFor($, sessionId, epoch)
+    const state = await startingStateFor($, sessionId, epoch, e.cwd)
     const isCurrentStart = () =>
       lifecycleIsCurrent(sessionId, epoch) && states.get(sessionId) === state && !state.closed
     if (!isCurrentStart()) return next(e)
@@ -624,9 +667,19 @@ export const register: Register = (on, options) => {
     if (globallyInvalid || state.integrityInvalid || state.contextGap) {
       state.availability = 'unavailable'
       if (!isCurrentStart()) return next(e)
-      await $.ui.status('approval reviewer unavailable — model-reviewed asks deny')
+      await $.ui.status(
+        `approval reviewer unavailable — model-reviewed asks deny${
+          state.storeLoadFailed ? ' (store)' : ''
+        }`,
+      )
       if (!isCurrentStart()) return next(e)
-      await saveState($, state)
+      if (!state.storeLoadFailed) {
+        try {
+          await saveState($, state)
+        } catch {
+          bestEffortStatus($, 'approval reviewer unavailable — history store unavailable (store)')
+        }
+      }
       return next(e)
     }
 
@@ -647,7 +700,11 @@ export const register: Register = (on, options) => {
         : 'approval reviewer unavailable — model-reviewed asks deny',
     )
     if (!isCurrentStart()) return next(e)
-    await saveState($, state)
+    try {
+      await saveState($, state)
+    } catch {
+      bestEffortStatus($, `approval reviewer ${state.availability} — history store unavailable (store)`)
+    }
     return next(e)
   }).catch(($, e, next) => {
     invalidateAll($)
@@ -679,7 +736,11 @@ export const register: Register = (on, options) => {
       state.instructionGeneration === instructionGeneration
     ) {
       appendOwner(state, e.text, result.text)
-      await saveState($, state)
+      try {
+        await saveState($, state)
+      } catch {
+        invalidateState($, state, 'store')
+      }
     }
     return result
   }).catch(($, e, next) => {
@@ -720,7 +781,11 @@ export const register: Register = (on, options) => {
     ) {
       state.agentTasks.push([result.agentId, e.prompt])
       state.agentTasks = state.agentTasks.slice(-128)
-      await saveState($, state)
+      try {
+        await saveState($, state)
+      } catch {
+        invalidateState($, state, 'store')
+      }
     }
     return result
   }).catch($ => {
@@ -738,7 +803,11 @@ export const register: Register = (on, options) => {
       for (const call of calls.values()) {
         if (call.sessionId === e.sessionId) call.closed = true
       }
-      await saveState($, state)
+      try {
+        await saveState($, state)
+      } catch {
+        bestEffortStatus($, 'approval reviewer history store unavailable (store)')
+      }
     }
     return next(e)
   }).catch(($, e, next) => {
